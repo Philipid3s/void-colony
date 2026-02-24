@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  background-color: #060d18;
+  color: #c8d8e8;
+  font-family: 'Courier New', Courier, monospace;
+  min-height: 100vh;
+}
+
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #0d1626; }
+::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 3px; }
