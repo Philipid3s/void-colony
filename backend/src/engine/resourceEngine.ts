@@ -1,9 +1,8 @@
 import { GameState } from '../models/GameState';
 import { BUILDINGS } from '../config/buildings';
-import { ResourceId } from '../config/resources';
 import {
   CREW_WATER_PER_TICK, CREW_FOOD_PER_TICK, CREW_OXYGEN_PER_TICK,
-  TICKS_PER_DAY, DAY_TICKS,
+  DIFFICULTY_MULTIPLIERS,
 } from '../config/balance';
 
 export function tickResources(state: GameState): void {
@@ -11,6 +10,7 @@ export function tickResources(state: GameState): void {
   const consumption: Record<string, number> = {};
 
   const isDay = state.isDay;
+  const resourceRate = DIFFICULTY_MULTIPLIERS[state.difficulty].resourceRate;
 
   // ── Building production / consumption ─────────────────────────────────────
   for (const building of state.buildings) {
@@ -40,7 +40,7 @@ export function tickResources(state: GameState): void {
     // Mine buildings: use selected miningResource instead of static production
     if ((building.type === 'mine_basic' || building.type === 'mine_advanced') && building.miningResource) {
       const rate = building.type === 'mine_basic' ? 8 / 30 : 15 / 30;
-      addTo(production, building.miningResource, rate * workerFactor);
+      addTo(production, building.miningResource, rate * workerFactor * resourceRate);
       for (const cons of def.consumption) {
         addTo(consumption, cons.resource, cons.perTick * workerFactor);
       }
@@ -53,7 +53,7 @@ export function tickResources(state: GameState): void {
       if (building.type === 'solar_array') {
         amount = isDay ? amount : 0;
       }
-      addTo(production, prod.resource, amount);
+      addTo(production, prod.resource, amount * resourceRate);
     }
 
     for (const cons of def.consumption) {

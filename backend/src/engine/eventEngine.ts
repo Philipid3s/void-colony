@@ -1,5 +1,5 @@
 import { GameState, ActiveEvent } from '../models/GameState';
-import { MORALE_CREW_DEATH_PENALTY, MORALE_MUTINY_THRESHOLD } from '../config/balance';
+import { DIFFICULTY_MULTIPLIERS } from '../config/balance';
 import { v4 as uuidv4 } from 'uuid';
 
 // Probability weights per event per tick (adjust for frequency)
@@ -15,16 +15,7 @@ const EVENT_WEIGHTS: Record<string, number> = {
 
 export function tickEvents(state: GameState): void {
   const tick = state.tick;
-
-  // Apply morale penalty for deaths this tick
-  const newDeaths = state.crew.filter(c => !c.isAlive && c.health === 0);
-  if (newDeaths.length > 0) {
-    for (const crew of state.crew) {
-      if (crew.isAlive) {
-        crew.morale = Math.max(0, crew.morale - MORALE_CREW_DEATH_PENALTY * newDeaths.length);
-      }
-    }
-  }
+  const eventFreq = DIFFICULTY_MULTIPLIERS[state.difficulty].eventFreq;
 
   // Resolve expired active events
   for (const evt of state.activeEvents) {
@@ -36,7 +27,7 @@ export function tickEvents(state: GameState): void {
 
   // Random event roll
   for (const [evtType, weight] of Object.entries(EVENT_WEIGHTS)) {
-    if (Math.random() < weight) {
+    if (Math.random() < Math.min(1, weight * eventFreq)) {
       triggerEvent(state, evtType);
     }
   }

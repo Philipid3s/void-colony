@@ -1,21 +1,65 @@
 import { Router, Request, Response } from 'express';
 import { getGameState, setGameState } from '../gameLoop';
 import { createInitialState } from '../engine/initialState';
-import { startConstruction } from '../engine/buildingEngine';
-import { startResearch, unlockAvailableTechs } from '../engine/researchEngine';
+import { canStartConstruction, startConstruction } from '../engine/buildingEngine';
+import { startResearch } from '../engine/researchEngine';
 import { saveState, loadState, listSaves } from '../db/database';
 import { Difficulty, RationLevel, TaskId } from '../models/GameState';
-import { TechId } from '../config/techs';
+import { TECHS, TechId } from '../config/techs';
 import { RECIPES } from '../config/recipes';
 import { BUILDINGS } from '../config/buildings';
+import { RESOURCES } from '../config/resources';
 import { startCrafting } from '../engine/craftingEngine';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
+const DIFFICULTIES: readonly Difficulty[] = ['easy', 'normal', 'hard', 'nightmare'];
+const RATION_LEVELS: readonly RationLevel[] = [50, 75, 100, 125];
+const BUILDING_TYPES = new Set(Object.keys(BUILDINGS));
+const TECH_IDS = new Set(Object.keys(TECHS));
+const RESOURCE_IDS = new Set(Object.keys(RESOURCES));
+const RECIPE_IDS = new Set(RECIPES.map(r => r.id));
+const MINE_BASIC_RESOURCES = new Set(['iron_ore', 'coal', 'sand', 'clay', 'copper', 'aluminium', 'silicon', 'sulfur']);
+const MINE_ADV_RESOURCES = new Set([...MINE_BASIC_RESOURCES, 'titanium', 'nickel', 'lithium', 'gold', 'rare_earth', 'uranium', 'helium3']);
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readNullableString(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  return readString(value);
+}
+
+function readInt(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null;
+  return value;
+}
+
+function readBool(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function isTaskIdValue(value: unknown): value is TaskId {
+  return typeof value === 'string' && /^task_[a-z_]+$/.test(value);
+}
 
 // ── Game management ───────────────────────────────────────────────────────────
 router.post('/game/new', (req: Request, res: Response) => {
-  const difficulty: Difficulty = req.body.difficulty ?? 'normal';
+  const body = isObject(req.body) ? req.body : {};
+  const rawDifficulty = body['difficulty'];
+  let difficulty: Difficulty = 'normal';
+  if (rawDifficulty != null) {
+    if (typeof rawDifficulty !== 'string' || !DIFFICULTIES.includes(rawDifficulty as Difficulty)) {
+      return res.status(400).json({ error: 'Invalid difficulty. Use easy, normal, hard, or nightmare.' });
+    }
+    difficulty = rawDifficulty as Difficulty;
+  }
+
   const state = createInitialState(difficulty);
   setGameState(state);
   saveState(state);
@@ -36,8 +80,13 @@ router.post('/game/save', (_req: Request, res: Response) => {
 });
 
 router.post('/game/load', (req: Request, res: Response) => {
-  const { saveId } = req.body;
-  const state = loadState(saveId ?? 1);
+  const body = isObject(req.body) ? req.body : {};
+  const parsed = body['saveId'] == null ? 1 : readInt(body['saveId']);
+  if (parsed == null || parsed < 1) {
+    return res.status(400).json({ error: 'Invalid saveId. Must be a positive integer.' });
+  }
+
+  const state = loadState(parsed);
   if (!state) return res.status(404).json({ error: 'Save not found' });
   // Migrate old saves missing new fields
   if (!state.craftingJobs) state.craftingJobs = [];
@@ -69,7 +118,21 @@ router.post('/action/assign-crew', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { crewId, taskId, buildingId } = req.body as { crewId: string; taskId: TaskId | null; buildingId: string | null };
+  const body = isObject(req.body) ? req.body : null;
+  if (!body) return res.status(400).json({ error: 'Invalid request body' });
+
+  const crewId = readString(body['crewId']);
+  const rawTask = body['taskId'];
+  const taskId: TaskId | null = rawTask === null
+    ? null
+    : (isTaskIdValue(rawTask) ? rawTask : null);
+  const parsedBuildingId = readNullableString(body['buildingId']);
+  const buildingId = parsedBuildingId === undefined ? null : parsedBuildingId;
+
+  if (!crewId || (rawTask !== null && !isTaskIdValue(rawTask)) || parsedBuildingId === undefined) {
+    return res.status(400).json({ error: 'Invalid assign-crew payload' });
+  }
+
   const crew = state.crew.find(c => c.id === crewId);
   if (!crew) return res.status(404).json({ error: 'Crew member not found' });
 
@@ -83,15 +146,30 @@ router.post('/action/assign-crew-bulk', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { assignments } = req.body as {
-    assignments: { crewId: string; taskId: TaskId | null; buildingId: string | null }[]
-  };
+  const body = isObject(req.body) ? req.body : null;
+  const assignments = body?.['assignments'];
+  if (!Array.isArray(assignments)) {
+    return res.status(400).json({ error: 'Invalid assignments payload' });
+  }
+  if (assignments.length > 500) {
+    return res.status(400).json({ error: 'Too many assignments in one request' });
+  }
 
-  for (const a of assignments) {
-    const crew = state.crew.find(c => c.id === a.crewId);
+  for (const raw of assignments) {
+    if (!isObject(raw)) continue;
+    const crewId = readString(raw['crewId']);
+    const rawTask = raw['taskId'];
+    const taskId: TaskId | null = rawTask === null
+      ? null
+      : (isTaskIdValue(rawTask) ? rawTask : null);
+    const parsedBuildingId = readNullableString(raw['buildingId']);
+    const buildingId = parsedBuildingId === undefined ? null : parsedBuildingId;
+    if (!crewId || (rawTask !== null && !isTaskIdValue(rawTask)) || parsedBuildingId === undefined) continue;
+
+    const crew = state.crew.find(c => c.id === crewId);
     if (crew) {
-      crew.assignedTask = a.taskId;
-      crew.assignedBuildingId = a.buildingId ?? null;
+      crew.assignedTask = taskId;
+      crew.assignedBuildingId = buildingId ?? null;
     }
   }
 
@@ -102,9 +180,25 @@ router.post('/action/build', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { buildingType } = req.body as { buildingType: string };
+  const body = isObject(req.body) ? req.body : null;
+  const buildingType = readString(body?.['buildingType']);
+  if (!buildingType || !BUILDING_TYPES.has(buildingType)) {
+    return res.status(400).json({ error: 'Invalid buildingType' });
+  }
+
+  const check = canStartConstruction(state, buildingType);
+  if (!check.ok) {
+    if (check.reason === 'missing_tech') {
+      return res.status(400).json({ error: `Missing prerequisite tech: ${check.details}` });
+    }
+    if (check.reason === 'insufficient_resources') {
+      return res.status(400).json({ error: 'Cannot build: insufficient resources' });
+    }
+    return res.status(400).json({ error: 'Cannot build: invalid building type' });
+  }
+
   const building = startConstruction(state, buildingType);
-  if (!building) return res.status(400).json({ error: 'Cannot build: insufficient resources or invalid type' });
+  if (!building) return res.status(400).json({ error: 'Cannot build' });
 
   res.json({ ok: true, building });
 });
@@ -113,8 +207,13 @@ router.post('/action/research', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { techId } = req.body as { techId: TechId };
-  const ok = startResearch(state, techId);
+  const body = isObject(req.body) ? req.body : null;
+  const techId = readString(body?.['techId']);
+  if (!techId || !TECH_IDS.has(techId)) {
+    return res.status(400).json({ error: 'Invalid techId' });
+  }
+
+  const ok = startResearch(state, techId as TechId);
   if (!ok) return res.status(400).json({ error: 'Cannot research: prerequisites not met or already completed' });
 
   res.json({ ok: true });
@@ -124,9 +223,12 @@ router.post('/action/set-rations', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { level } = req.body as { level: RationLevel };
-  if (![50, 75, 100, 125].includes(level)) return res.status(400).json({ error: 'Invalid ration level' });
-  state.rationLevel = level;
+  const body = isObject(req.body) ? req.body : null;
+  const level = readInt(body?.['level']);
+  if (level == null || !RATION_LEVELS.includes(level as RationLevel)) {
+    return res.status(400).json({ error: 'Invalid ration level' });
+  }
+  state.rationLevel = level as RationLevel;
 
   res.json({ ok: true });
 });
@@ -135,7 +237,13 @@ router.post('/action/set-energy', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { buildingId, powered } = req.body as { buildingId: string; powered: boolean };
+  const body = isObject(req.body) ? req.body : null;
+  const buildingId = readString(body?.['buildingId']);
+  const powered = readBool(body?.['powered']);
+  if (!buildingId || powered == null) {
+    return res.status(400).json({ error: 'Invalid set-energy payload' });
+  }
+
   const building = state.buildings.find(b => b.id === buildingId);
   if (!building) return res.status(404).json({ error: 'Building not found' });
   building.powered = powered;
@@ -157,10 +265,25 @@ router.post('/action/set-mine-resource', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { buildingId, resource } = req.body as { buildingId: string; resource: string };
+  const body = isObject(req.body) ? req.body : null;
+  const buildingId = readString(body?.['buildingId']);
+  const resource = readString(body?.['resource']);
+  if (!buildingId || !resource || !RESOURCE_IDS.has(resource)) {
+    return res.status(400).json({ error: 'Invalid set-mine-resource payload' });
+  }
+
   const building = state.buildings.find(b => b.id === buildingId);
   if (!building) return res.status(404).json({ error: 'Building not found' });
-  building.miningResource = resource as any;
+  if (building.type !== 'mine_basic' && building.type !== 'mine_advanced') {
+    return res.status(400).json({ error: 'Target building is not a mine' });
+  }
+
+  const allowed = building.type === 'mine_basic' ? MINE_BASIC_RESOURCES : MINE_ADV_RESOURCES;
+  if (!allowed.has(resource)) {
+    return res.status(400).json({ error: `Resource ${resource} cannot be mined by ${building.type}` });
+  }
+
+  building.miningResource = resource as keyof typeof RESOURCES;
 
   res.json({ ok: true });
 });
@@ -169,7 +292,12 @@ router.post('/action/dismantle', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { buildingId } = req.body as { buildingId: string };
+  const body = isObject(req.body) ? req.body : null;
+  const buildingId = readString(body?.['buildingId']);
+  if (!buildingId) {
+    return res.status(400).json({ error: 'Invalid buildingId' });
+  }
+
   const idx = state.buildings.findIndex(b => b.id === buildingId);
   if (idx === -1) return res.status(404).json({ error: 'Building not found' });
 
@@ -208,7 +336,13 @@ router.post('/action/craft', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { recipeId, buildingId } = req.body as { recipeId: string; buildingId: string };
+  const body = isObject(req.body) ? req.body : null;
+  const recipeId = readString(body?.['recipeId']);
+  const buildingId = readString(body?.['buildingId']);
+  if (!recipeId || !RECIPE_IDS.has(recipeId) || !buildingId) {
+    return res.status(400).json({ error: 'Invalid craft payload' });
+  }
+
   const job = startCrafting(state, recipeId, buildingId);
   if (!job) return res.status(400).json({ error: 'Cannot craft: check resources, building, and recipe compatibility' });
 
@@ -219,7 +353,16 @@ router.post('/action/scout-tile', (req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const { x, y } = req.body as { x: number; y: number };
+  const body = isObject(req.body) ? req.body : null;
+  const x = readInt(body?.['x']);
+  const y = readInt(body?.['y']);
+  if (x == null || y == null) {
+    return res.status(400).json({ error: 'Invalid scout coordinates' });
+  }
+  if (y < 0 || y >= state.map.length || x < 0 || x >= state.map[0].length) {
+    return res.status(400).json({ error: 'Scout coordinates out of bounds' });
+  }
+
   const scouts = state.crew.filter(c => c.isAlive && c.assignedTask === 'task_scout');
   if (scouts.length === 0) {
     return res.status(400).json({ error: 'No scouts assigned. Assign crew to the Scout task first.' });

@@ -4,63 +4,76 @@ import {
   CREW_HUNGER_DRAIN, CREW_THIRST_DRAIN,
   MORALE_ADEQUATE_FOOD_BONUS, MORALE_ADEQUATE_WATER_BONUS,
   MORALE_RATION_50_PENALTY, MORALE_RATION_75_PENALTY, MORALE_RATION_125_BONUS,
-  MORALE_MUTINY_THRESHOLD,
+  MORALE_CREW_DEATH_PENALTY,
+  DIFFICULTY_MULTIPLIERS,
 } from '../config/balance';
 
 export function tickCrew(state: GameState): void {
+  const difficulty = DIFFICULTY_MULTIPLIERS[state.difficulty];
+  const resilience = difficulty.crewResilience;
+  const hardship = 1 / Math.max(resilience, 0.01);
+
   let totalMorale = 0;
   let aliveCount  = 0;
 
   for (const crew of state.crew) {
     if (!crew.isAlive) continue;
-    aliveCount++;
 
-    // ── Energy / fatigue ──────────────────────────────────────────────────
+    // Energy / fatigue
     if (crew.assignedTask === 'task_rest' || crew.assignedTask === null) {
-      crew.energy = Math.min(100, crew.energy + CREW_ENERGY_REST_REGEN);
+      crew.energy = Math.min(100, crew.energy + CREW_ENERGY_REST_REGEN * resilience);
     } else {
-      crew.energy = Math.max(0, crew.energy - CREW_ENERGY_WORK_DRAIN);
+      crew.energy = Math.max(0, crew.energy - CREW_ENERGY_WORK_DRAIN * hardship);
     }
 
-    // ── Hunger drain ──────────────────────────────────────────────────────
-    crew.hunger = Math.max(0, crew.hunger - CREW_HUNGER_DRAIN);
-    crew.thirst = Math.max(0, crew.thirst - CREW_THIRST_DRAIN);
+    // Hunger / thirst
+    crew.hunger = Math.max(0, crew.hunger - CREW_HUNGER_DRAIN * hardship);
+    crew.thirst = Math.max(0, crew.thirst - CREW_THIRST_DRAIN * hardship);
 
-    // ── Restore from resources (food was consumed globally in resourceEngine)
+    // Restore from available food/water (resources were consumed globally in resourceEngine)
     const rationMult = state.rationLevel / 100;
     if (state.resources['food'] > 0) {
-      crew.hunger = Math.min(100, crew.hunger + (100 * rationMult) / 720);
+      crew.hunger = Math.min(100, crew.hunger + ((100 * rationMult) / 720) * resilience);
     }
     if (state.resources['water'] > 0) {
-      crew.thirst = Math.min(100, crew.thirst + (100 * rationMult) / 720);
+      crew.thirst = Math.min(100, crew.thirst + ((100 * rationMult) / 720) * resilience);
     }
 
-    // ── Morale adjustments ────────────────────────────────────────────────
-    if (crew.hunger > 50) crew.morale = Math.min(100, crew.morale + MORALE_ADEQUATE_FOOD_BONUS);
-    if (crew.thirst > 50) crew.morale = Math.min(100, crew.morale + MORALE_ADEQUATE_WATER_BONUS);
+    // Morale adjustments
+    if (crew.hunger > 50) crew.morale = Math.min(100, crew.morale + MORALE_ADEQUATE_FOOD_BONUS * resilience);
+    if (crew.thirst > 50) crew.morale = Math.min(100, crew.morale + MORALE_ADEQUATE_WATER_BONUS * resilience);
 
-    if (state.rationLevel === 50)  crew.morale = Math.max(0, crew.morale - MORALE_RATION_50_PENALTY);
-    if (state.rationLevel === 75)  crew.morale = Math.max(0, crew.morale - MORALE_RATION_75_PENALTY);
-    if (state.rationLevel === 125) crew.morale = Math.min(100, crew.morale + MORALE_RATION_125_BONUS);
+    if (state.rationLevel === 50)  crew.morale = Math.max(0, crew.morale - MORALE_RATION_50_PENALTY * hardship);
+    if (state.rationLevel === 75)  crew.morale = Math.max(0, crew.morale - MORALE_RATION_75_PENALTY * hardship);
+    if (state.rationLevel === 125) crew.morale = Math.min(100, crew.morale + MORALE_RATION_125_BONUS * resilience);
 
-    // ── Health damage from critical conditions ────────────────────────────
-    if (crew.hunger   < 10) crew.health = Math.max(0, crew.health - 0.5 / 720);
-    if (crew.thirst   < 20) crew.health = Math.max(0, crew.health - 1.0 / 720);
-    if (crew.energy   < 10) crew.health = Math.max(0, crew.health - 0.2 / 720);
-    if (crew.morale   < 20) crew.morale = Math.max(0, crew.morale - 0.5 / 720);
+    // Health damage from critical conditions
+    if (crew.hunger < 10) crew.health = Math.max(0, crew.health - (0.5 / 720) * hardship);
+    if (crew.thirst < 20) crew.health = Math.max(0, crew.health - (1.0 / 720) * hardship);
+    if (crew.energy < 10) crew.health = Math.max(0, crew.health - (0.2 / 720) * hardship);
+    if (crew.morale < 20) crew.morale = Math.max(0, crew.morale - (0.5 / 720) * hardship);
 
-    // ── Update status ─────────────────────────────────────────────────────
+    // Update status
     crew.status = deriveStatus(crew);
 
-    // ── Death check ───────────────────────────────────────────────────────
+    // Death check
     if (crew.health <= 0) {
       crew.isAlive = false;
-      crew.health  = 0;
-      // Morale hit applied in eventEngine
+      crew.health = 0;
+
+      // Apply one-time morale hit when a death happens.
+      const deathMoraleHit = MORALE_CREW_DEATH_PENALTY * hardship;
+      for (const other of state.crew) {
+        if (other.isAlive) {
+          other.morale = Math.max(0, other.morale - deathMoraleHit);
+        }
+      }
+
       addLog(state, `${crew.name} has died.`, 'danger');
       continue;
     }
 
+    aliveCount++;
     totalMorale += crew.morale;
   }
 
@@ -68,9 +81,9 @@ export function tickCrew(state: GameState): void {
 }
 
 function deriveStatus(c: CrewMember): CrewStatus {
-  if (c.status === 'sick')              return 'sick';
-  if (c.status === 'injured')           return 'injured';
-  if (c.status === 'radiation_sickness')return 'radiation_sickness';
+  if (c.status === 'sick')               return 'sick';
+  if (c.status === 'injured')            return 'injured';
+  if (c.status === 'radiation_sickness') return 'radiation_sickness';
   if (c.thirst < 20)  return 'dehydrated';
   if (c.hunger < 10)  return 'starving';
   if (c.hunger < 30)  return 'hungry';

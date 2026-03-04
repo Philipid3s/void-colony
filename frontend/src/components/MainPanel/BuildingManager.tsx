@@ -55,6 +55,11 @@ export default function BuildingManager({ state }: Props) {
 
   const canAfford = (def: BuildingDef): boolean =>
     def.cost.every(c => (state.resources[c.resource] ?? 0) >= c.amount);
+  const completedTechs = new Set(
+    state.research.filter(r => r.status === 'completed').map(r => r.techId)
+  );
+  const hasPrereqTech = (def: BuildingDef): boolean =>
+    !def.prereqTech || completedTechs.has(def.prereqTech);
 
   const handleBuild = async (id: string) => {
     const res = await actions.build(id);
@@ -284,19 +289,21 @@ export default function BuildingManager({ state }: Props) {
               <div className="space-y-1">
                 {buildable.filter(d => d.tier === tier).map(def => {
                   const affordable = canAfford(def);
+                  const unlocked = hasPrereqTech(def);
+                  const canBuild = affordable && unlocked;
                   return (
                     <button
                       key={def.id}
-                      onClick={() => { if (affordable) handleBuild(def.id); }}
-                      disabled={!affordable}
+                      onClick={() => { if (canBuild) handleBuild(def.id); }}
+                      disabled={!canBuild}
                       className={`w-full text-left rounded border p-2 text-xs transition-colors ${
-                        affordable
+                        canBuild
                           ? 'bg-slate-800 border-slate-600 hover:bg-slate-700 hover:border-slate-400 cursor-pointer'
                           : 'bg-slate-900 border-slate-700 opacity-50 cursor-not-allowed'
                       }`}
                     >
                       <div className="flex justify-between items-baseline mb-0.5">
-                        <span className={`font-medium ${affordable ? 'text-white' : 'text-slate-500'}`}>
+                        <span className={`font-medium ${canBuild ? 'text-white' : 'text-slate-500'}`}>
                           {def.name}
                         </span>
                         <span className="text-slate-500 text-xs ml-2 whitespace-nowrap">
@@ -306,6 +313,12 @@ export default function BuildingManager({ state }: Props) {
                       </div>
 
                       <div className="text-slate-400 mb-1.5">{def.description}</div>
+
+                      {def.prereqTech && !unlocked && (
+                        <div className="text-amber-300 mb-1">
+                          Requires tech: {def.prereqTech.replace(/_/g,' ')}
+                        </div>
+                      )}
 
                       {def.cost.length > 0 ? (
                         <div className="flex flex-wrap gap-x-3 gap-y-0.5">

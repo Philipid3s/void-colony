@@ -21,11 +21,13 @@ export default function MapView({ state }: Props) {
   const { map } = state;
   const actions = useActions();
   const mapRef = useRef<HTMLDivElement>(null);
+  const centeredRef = useRef(false);
   const [ctx, setCtx] = useState<ContextMenu | null>(null);
   const [msg, setMsg] = useState('');
 
   // Center on colony (@) when map first loads
   useEffect(() => {
+    if (centeredRef.current) return;
     if (!mapRef.current) return;
     const colonyTile = map.flat().find(t => t.structure === 'colony');
     if (!colonyTile) return;
@@ -35,7 +37,8 @@ export default function MapView({ state }: Props) {
     const el = mapRef.current;
     el.scrollLeft = cx - el.clientWidth / 2 + TILE_PX / 2;
     el.scrollTop  = cy - el.clientHeight / 2 + TILE_PX / 2;
-  }, [map.length]); // run once when map is available
+    centeredRef.current = true;
+  }, [map]);
 
   const handleContextMenu = (e: React.MouseEvent, tileX: number, tileY: number) => {
     e.preventDefault();

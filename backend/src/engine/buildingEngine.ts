@@ -3,6 +3,15 @@ import { BUILDINGS } from '../config/buildings';
 import { BASE_STORAGE_CAPACITY } from '../config/balance';
 import { v4 as uuidv4 } from 'uuid';
 
+export type ConstructionFailureReason =
+  | 'invalid_type'
+  | 'missing_tech'
+  | 'insufficient_resources';
+
+export type ConstructionCheckResult =
+  | { ok: true }
+  | { ok: false; reason: ConstructionFailureReason; details?: string };
+
 export function tickBuildings(state: GameState): void {
   for (const building of state.buildings) {
     if (building.status !== 'constructing') continue;
@@ -44,14 +53,32 @@ export function tickBuildings(state: GameState): void {
   state.storageCapacity = storage;
 }
 
+export function canStartConstruction(state: GameState, buildingType: string): ConstructionCheckResult {
+  const def = BUILDINGS[buildingType as keyof typeof BUILDINGS];
+  if (!def) return { ok: false, reason: 'invalid_type' };
+
+  if (def.prereqTech) {
+    const prereq = state.research.find(r => r.techId === def.prereqTech);
+    if (!prereq || prereq.status !== 'completed') {
+      return { ok: false, reason: 'missing_tech', details: def.prereqTech };
+    }
+  }
+
+  for (const cost of def.cost) {
+    if ((state.resources[cost.resource] ?? 0) < cost.amount) {
+      return { ok: false, reason: 'insufficient_resources' };
+    }
+  }
+
+  return { ok: true };
+}
+
 export function startConstruction(state: GameState, buildingType: string): BuildingInstance | null {
+  const check = canStartConstruction(state, buildingType);
+  if (!check.ok) return null;
+
   const def = BUILDINGS[buildingType as keyof typeof BUILDINGS];
   if (!def) return null;
-
-  // Check resources
-  for (const cost of def.cost) {
-    if ((state.resources[cost.resource] ?? 0) < cost.amount) return null;
-  }
 
   // Deduct resources
   for (const cost of def.cost) {

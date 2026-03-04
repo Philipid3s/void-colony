@@ -2,7 +2,10 @@
 
 > *50 survivors. One crashed ship. One mission.*
 
-A real-time browser-based colony management and survival game. Your spaceship has crash-landed on a remote planet. Manage your crew, scavenge resources, build infrastructure, and find a way home — or build a colony that never needs to leave.
+A real-time browser-based colony management and survival game. Your spaceship has crash-landed on a remote planet. Manage your crew, scavenge resources, build infrastructure, and find a way home - or build a colony that never needs to leave.
+
+
+![VOID COLONY gameplay screenshot](./void.colony.png)
 
 ---
 
@@ -132,3 +135,4 @@ space-outpost/
 ## License
 
 MIT
+
