@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { GameState, ServerMessage } from '../types/gameTypes';
-
-const WS_URL = `ws://${window.location.hostname}:3000`;
+import { WS_URL } from '../config/runtime';
 
 export function useGameState() {
   const [state, setState] = useState<GameState | null>(null);

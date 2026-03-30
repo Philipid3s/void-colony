@@ -1,9 +1,8 @@
 import { RationLevel, TaskId, Difficulty } from '../types/gameTypes';
-
-const API = '/api';
+import { API_BASE_URL } from '../config/runtime';
 
 async function post(path: string, body: unknown) {
-  const res = await fetch(`${API}${path}`, {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

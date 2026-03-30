@@ -9,6 +9,7 @@ import { setGameState, startLoop, setBroadcast } from './gameLoop';
 import { createInitialState } from './engine/initialState';
 import { broadcastState, registerClient } from './api/wsHandler';
 import apiRoutes from './api/routes';
+import { migrateSaveState } from './services/saveMigration';
 
 const PORT            = parseInt(process.env['PORT'] ?? '3000', 10);
 const DB_PATH         = process.env['DB_PATH'] ?? './void_colony.db';
@@ -46,24 +47,7 @@ async function main(): Promise<void> {
     state = createInitialState('normal');
   } else {
     console.log(`[Game] Loaded save — tick ${state.tick}`);
-    // Migrate old saves missing new fields
-    if (!state.craftingJobs) state.craftingJobs = [];
-    if (state.shipScavengeCount == null) state.shipScavengeCount = 0;
-    if (!state.quests.some(q => q.questId === 'q_salvage_dawn')) {
-      const { v4: uuidv4 } = require('uuid');
-      const scavengeCount = state.shipScavengeCount ?? 0;
-      state.quests.unshift({
-        questId: 'q_salvage_dawn',
-        title: 'Salvage Dawn',
-        description: 'The ship is wrecked, but its materials could save your colony. Strip it before the elements do.',
-        status: scavengeCount >= 4 ? 'completed' : 'active',
-        chapter: 1,
-        objectives: [
-          { id: uuidv4(), description: 'Scavenge the crashed ship (first run)', completed: scavengeCount >= 1 },
-          { id: uuidv4(), description: 'Completely strip the ship (all 4 salvage runs)', completed: scavengeCount >= 4 },
-        ],
-      });
-    }
+    state = migrateSaveState(state);
   }
   setGameState(state);
 

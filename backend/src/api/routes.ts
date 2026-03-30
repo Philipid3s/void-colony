@@ -10,6 +10,7 @@ import { RECIPES } from '../config/recipes';
 import { BUILDINGS } from '../config/buildings';
 import { RESOURCES } from '../config/resources';
 import { startCrafting } from '../engine/craftingEngine';
+import { migrateSaveState } from '../services/saveMigration';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
@@ -88,25 +89,9 @@ router.post('/game/load', (req: Request, res: Response) => {
 
   const state = loadState(parsed);
   if (!state) return res.status(404).json({ error: 'Save not found' });
-  // Migrate old saves missing new fields
-  if (!state.craftingJobs) state.craftingJobs = [];
-  if (state.shipScavengeCount == null) state.shipScavengeCount = 0;
-  if (!state.quests.some(q => q.questId === 'q_salvage_dawn')) {
-    const scavengeCount = state.shipScavengeCount ?? 0;
-    state.quests.unshift({
-      questId: 'q_salvage_dawn',
-      title: 'Salvage Dawn',
-      description: 'The ship is wrecked, but its materials could save your colony. Strip it before the elements do.',
-      status: scavengeCount >= 4 ? 'completed' : 'active',
-      chapter: 1,
-      objectives: [
-        { id: uuidv4(), description: 'Scavenge the crashed ship (first run)', completed: scavengeCount >= 1 },
-        { id: uuidv4(), description: 'Completely strip the ship (all 4 salvage runs)', completed: scavengeCount >= 4 },
-      ],
-    });
-  }
-  setGameState(state);
-  res.json({ ok: true, state });
+  const migrated = migrateSaveState(state);
+  setGameState(migrated);
+  res.json({ ok: true, state: migrated });
 });
 
 router.get('/game/saves', (_req: Request, res: Response) => {

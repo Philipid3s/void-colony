@@ -1,24 +1,116 @@
 # VOID COLONY
 
-> *50 survivors. One crashed ship. One mission.*
+Browser-based real-time colony management game built as a TypeScript monorepo.
 
-A real-time browser-based colony management and survival game. Your spaceship has crash-landed on a remote planet. Manage your crew, scavenge resources, build infrastructure, and find a way home - or build a colony that never needs to leave.
-
+The current implementation is a playable vertical slice: a Node/Express backend runs the simulation, persists a single save to SQLite, and broadcasts full game-state snapshots to a React frontend over WebSocket.
 
 ![VOID COLONY gameplay screenshot](./void.colony.png)
 
----
+## Current Status
+
+This repository is not a full implementation of the design document in [specs/VOID_COLONY_GDD.md](./specs/VOID_COLONY_GDD.md).
+
+What is implemented today:
+- Real-time tick loop running every 2 seconds
+- Single active colony save persisted to SQLite
+- REST actions for crew assignment, construction, research, crafting, scouting, rationing, saving, loading, and ship scavenging
+- WebSocket state sync from backend to frontend
+- Crew survival simulation for hunger, thirst, energy, morale, injury, sickness, and death
+- Building, research, quest, event, crafting, and scouting subsystems
+- Basic management UI with tabs for crew, buildings, crafting, research, quests, map, and event log
+
+What is mostly data or planned scope right now:
+- Large portions of the higher-tier building tree
+- Many late-game technologies and victory-path systems
+- Deeper map generation and deposit discovery
+- Multiple saves, auth, multiplayer, and offline progression
+- Automated tests and production deployment workflow
 
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Backend | Node.js + TypeScript (CommonJS), Express, `ws` (WebSocket), `better-sqlite3` |
-| Frontend | React 19 + Vite + Tailwind CSS v4 |
-| Database | SQLite (via `better-sqlite3`) |
-| Communication | REST API + WebSocket (real-time state sync) |
+| --- | --- |
+| Backend | Node.js, TypeScript, Express 5, `ws`, `better-sqlite3` |
+| Frontend | React 19, Vite 7, TypeScript, Tailwind CSS 4 |
+| Persistence | SQLite |
+| Runtime model | Single in-memory game state plus periodic persistence |
 
----
+## Repository Layout
+
+```text
+space-outpost/
+├── backend/              # Simulation server, API, persistence
+│   └── src/
+│       ├── api/          # REST routes and WebSocket wiring
+│       ├── config/       # Resources, buildings, techs, recipes, balance
+│       ├── db/           # SQLite access
+│       ├── engine/       # Tick-based simulation subsystems
+│       ├── models/       # Game state types
+│       ├── gameLoop.ts   # Main tick loop
+│       └── server.ts     # Backend entry point
+├── frontend/             # React client
+│   └── src/
+│       ├── components/   # Sidebar, main panels, event log, header
+│       ├── hooks/        # WebSocket state + REST actions
+│       ├── types/        # Frontend game state types
+│       └── utils/        # Formatting helpers
+├── specs/                # Design and product reference docs
+└── package.json          # Root scripts for local development
+```
+
+## Architecture
+
+### Backend flow
+
+1. `backend/src/server.ts` initializes SQLite and loads save `id = 1`.
+2. If no save exists, `createInitialState()` creates a new colony.
+3. `startLoop()` runs the simulation every `TICK_INTERVAL_MS` milliseconds.
+4. Each tick mutates the in-memory `GameState` through engine modules in order:
+   - resources
+   - crew
+   - buildings
+   - research
+   - events
+   - quests
+   - crafting
+   - scouting
+5. Every 30 ticks, the backend saves state to SQLite.
+6. After each tick, the backend broadcasts the full state snapshot to connected clients.
+
+### Frontend flow
+
+- `useGameState()` opens a WebSocket connection to `ws://<hostname>:3000`.
+- `useActions()` sends REST `POST` requests to `/api/...`.
+- `App.tsx` renders the latest server-owned snapshot and delegates user actions back to the backend.
+
+This means the backend is the source of truth and the frontend is primarily a thin renderer plus action dispatcher.
+
+## Implemented Gameplay Snapshot
+
+### Starting state
+
+- Approximately 10 to 14 crew members at game start
+- Initial crash-site buildings including ship, quarters, warehouse, repair station, cooking station, and broken radio
+- A 20x20 map with the colony placed at the center and nearby tiles pre-explored
+- Starting stockpile of life-support and early construction resources
+
+### Simulation rules
+
+- `1 tick = 2 real seconds`
+- `30 ticks = 1 game hour`
+- `720 ticks = 1 game day`
+- Day/night cycle affects solar generation
+- Rationing affects both morale and survival
+- Random events can injure crew, reduce morale, or damage buildings
+- Research requires an operational research lab plus assigned researchers
+- Construction requires assigned builders on the target building
+- Crafting jobs consume resources immediately and deliver outputs when the timer completes
+
+### Persistence model
+
+- Saves are stored in SQLite as serialized JSON
+- The current code uses a single active save slot by default
+- The backend performs light save migration for some newly added fields
 
 ## Getting Started
 
@@ -27,112 +119,72 @@ A real-time browser-based colony management and survival game. Your spaceship ha
 - Node.js 18+
 - npm 9+
 
-### Install & Run
+### Install
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/space-outpost.git
-cd space-outpost
-
-# Install all dependencies (root + backend + frontend)
 npm install
 npm install --prefix backend
 npm install --prefix frontend
+```
 
-# Start development (backend + frontend concurrently)
+### Run in development
+
+```bash
 npm run dev
 ```
 
-- **Backend** runs on `http://localhost:3000`
-- **Frontend** runs on `http://localhost:5173`
+Services:
+- Backend: `http://localhost:3000`
+- Frontend: `http://localhost:5173`
+- WebSocket: `ws://localhost:3000`
 
-### Production Build
+### Build
 
 ```bash
 npm run build
-# Then start backend
+```
+
+### Run backend from build output
+
+```bash
 npm run start:backend
 ```
 
----
+## Scripts
 
-## Project Structure
+### Root
 
-```
-space-outpost/
-├── backend/
-│   ├── src/
-│   │   ├── api/          # Express routes + WebSocket handler
-│   │   ├── config/       # Game data (buildings, resources, recipes, tech tree, balance)
-│   │   ├── db/           # SQLite database layer
-│   │   ├── engine/       # Game loop engines (resources, crew, buildings, events, quests...)
-│   │   ├── models/       # TypeScript interfaces (GameState, CrewMember, etc.)
-│   │   └── server.ts     # Entry point
-│   └── package.json
-├── frontend/
-│   ├── src/
-│   │   ├── components/   # React UI components (tabs, panels, sidebar)
-│   │   ├── hooks/        # useGameState (WebSocket), useActions (API calls)
-│   │   ├── types/        # Shared TypeScript types
-│   │   └── utils/        # Formatters, helpers
-│   └── package.json
-├── specs/
-│   └── VOID_COLONY_GDD.md   # Full Game Design Document
-└── package.json             # Root workspace (runs both services)
+```bash
+npm run dev
+npm run build
+npm run start:backend
+npm run start:frontend
 ```
 
----
+### Backend
 
-## Gameplay
+```bash
+npm run dev --prefix backend
+npm run build --prefix backend
+npm run start --prefix backend
+```
 
-### Core Loop
+### Frontend
 
-1. **Scavenge** the crashed ship for starting materials (4 salvage runs, diminishing returns)
-2. **Assign crew** to survival tasks — water collection, food production, oxygen generation
-3. **Build** structures to automate production and expand capacity
-4. **Research** technologies to unlock advanced buildings and recipes
-5. **Explore** the map to find resource deposits and alien artifacts
-6. **Repair** the radio transmitter and signal for rescue — or build a self-sustaining colony
+```bash
+npm run dev --prefix frontend
+npm run build --prefix frontend
+npm run lint --prefix frontend
+```
 
-### Time System
+## Notes And Limitations
 
-| Real Time | Game Time |
-|-----------|-----------|
-| 1 minute | 1 game hour |
-| 24 minutes | 1 game day |
-| ~2h 48min | 1 game week |
+- The backend keeps all live game logic in one mutable in-memory state object.
+- API handlers mutate state directly instead of going through a dedicated command layer.
+- WebSocket updates send the full state object each tick rather than patches.
+- There is currently no automated test suite behind the shipped scripts.
+- Some README claims from earlier drafts, including crew scale and full feature coverage, were ahead of the implementation and have been corrected here.
 
-### Win Conditions
+## Design Reference
 
-- **Primary** — Repair the radio and contact the rescue fleet
-- **Secondary** — Build a fully self-sustaining colony
-- **Secret** — Discover the planet's hidden secret through exploration
-
-### Difficulty
-
-| Mode | Resources | Events | Crew Resilience |
-|------|-----------|--------|-----------------|
-| Easy | ×1.5 | ×0.5 | ×1.5 |
-| Normal | ×1.0 | ×1.0 | ×1.0 |
-| Hard | ×0.7 | ×1.5 | ×0.7 |
-| Nightmare | ×0.5 | ×2.0 | ×0.5 |
-
----
-
-## Key Features
-
-- **Real-time simulation** — the colony runs every 2 seconds whether you're watching or not
-- **Auto-save** — state is persisted to SQLite on an interval
-- **Day/Night cycle** — solar power only works during the day; crew fatigue and morale shift with the cycle
-- **Crew specializations** — engineer, miner, scientist, farmer, doctor, pilot, security, cook, technician, leader
-- **Tech tree** — research unlocks advanced buildings, crafting recipes, and capabilities
-- **Event system** — random events (storms, illness, equipment failures) require player decisions
-- **Crafting** — combine raw materials into processed goods (steel, electronics, medicine, etc.)
-- **Full resource economy** — 40+ resources across life support, metals, non-metals, and processed goods
-
----
-
-## License
-
-MIT
-
+The design intent lives in [specs/VOID_COLONY_GDD.md](./specs/VOID_COLONY_GDD.md). Treat that file as target scope, not as a statement of completed functionality.
