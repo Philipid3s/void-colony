@@ -10,6 +10,7 @@ import { RECIPES } from '../config/recipes';
 import { BUILDINGS } from '../config/buildings';
 import { RESOURCES } from '../config/resources';
 import { startCrafting } from '../engine/craftingEngine';
+import { assignCrewTask, dismantleBuilding, scavengeShip as scavengeShipAction, setMineResource as setMineResourceAction } from '../services/gameActions';
 import { migrateSaveState } from '../services/saveMigration';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -18,10 +19,7 @@ const DIFFICULTIES: readonly Difficulty[] = ['easy', 'normal', 'hard', 'nightmar
 const RATION_LEVELS: readonly RationLevel[] = [50, 75, 100, 125];
 const BUILDING_TYPES = new Set(Object.keys(BUILDINGS));
 const TECH_IDS = new Set(Object.keys(TECHS));
-const RESOURCE_IDS = new Set(Object.keys(RESOURCES));
 const RECIPE_IDS = new Set(RECIPES.map(r => r.id));
-const MINE_BASIC_RESOURCES = new Set(['iron_ore', 'coal', 'sand', 'clay', 'copper', 'aluminium', 'silicon', 'sulfur']);
-const MINE_ADV_RESOURCES = new Set([...MINE_BASIC_RESOURCES, 'titanium', 'nickel', 'lithium', 'gold', 'rare_earth', 'uranium', 'helium3']);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -118,11 +116,8 @@ router.post('/action/assign-crew', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid assign-crew payload' });
   }
 
-  const crew = state.crew.find(c => c.id === crewId);
-  if (!crew) return res.status(404).json({ error: 'Crew member not found' });
-
-  crew.assignedTask = taskId;
-  crew.assignedBuildingId = buildingId ?? null;
+  const ok = assignCrewTask(state, crewId, taskId, buildingId ?? null);
+  if (!ok) return res.status(404).json({ error: 'Crew member not found' });
 
   res.json({ ok: true });
 });
@@ -253,22 +248,20 @@ router.post('/action/set-mine-resource', (req: Request, res: Response) => {
   const body = isObject(req.body) ? req.body : null;
   const buildingId = readString(body?.['buildingId']);
   const resource = readString(body?.['resource']);
-  if (!buildingId || !resource || !RESOURCE_IDS.has(resource)) {
+  if (!buildingId || !resource || !(resource in RESOURCES)) {
     return res.status(400).json({ error: 'Invalid set-mine-resource payload' });
   }
 
-  const building = state.buildings.find(b => b.id === buildingId);
-  if (!building) return res.status(404).json({ error: 'Building not found' });
-  if (building.type !== 'mine_basic' && building.type !== 'mine_advanced') {
-    return res.status(400).json({ error: 'Target building is not a mine' });
+  const result = setMineResourceAction(state, buildingId, resource);
+  if (!result.ok) {
+    if (result.error === 'building_not_found') {
+      return res.status(404).json({ error: 'Building not found' });
+    }
+    if (result.error === 'not_a_mine') {
+      return res.status(400).json({ error: 'Target building is not a mine' });
+    }
+    return res.status(400).json({ error: 'Invalid set-mine-resource payload' });
   }
-
-  const allowed = building.type === 'mine_basic' ? MINE_BASIC_RESOURCES : MINE_ADV_RESOURCES;
-  if (!allowed.has(resource)) {
-    return res.status(400).json({ error: `Resource ${resource} cannot be mined by ${building.type}` });
-  }
-
-  building.miningResource = resource as keyof typeof RESOURCES;
 
   res.json({ ok: true });
 });
@@ -283,38 +276,10 @@ router.post('/action/dismantle', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid buildingId' });
   }
 
-  const idx = state.buildings.findIndex(b => b.id === buildingId);
-  if (idx === -1) return res.status(404).json({ error: 'Building not found' });
+  const result = dismantleBuilding(state, buildingId);
+  if (!result) return res.status(404).json({ error: 'Building not found' });
 
-  const building = state.buildings[idx];
-  const def = BUILDINGS[building.type as keyof typeof BUILDINGS];
-
-  // Calculate 50% resource refund from build cost
-  // If still constructing, scale by construction progress
-  const refund: Record<string, number> = {};
-  if (def && def.cost.length > 0) {
-    const progressFactor = building.status === 'constructing'
-      ? building.constructionProgress / 100
-      : 1;
-    for (const c of def.cost) {
-      const amount = Math.floor(c.amount * 0.5 * progressFactor);
-      if (amount > 0) {
-        state.resources[c.resource] = (state.resources[c.resource] ?? 0) + amount;
-        refund[c.resource] = amount;
-      }
-    }
-  }
-
-  // Unassign any workers
-  for (const crew of state.crew) {
-    if (crew.assignedBuildingId === buildingId) {
-      crew.assignedTask = null;
-      crew.assignedBuildingId = null;
-    }
-  }
-
-  state.buildings.splice(idx, 1);
-  res.json({ ok: true, refund });
+  res.json({ ok: true, refund: result.refund });
 });
 
 router.post('/action/craft', (req: Request, res: Response) => {

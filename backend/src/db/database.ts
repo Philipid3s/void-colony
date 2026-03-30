@@ -8,6 +8,12 @@ export function getDb(): Database.Database {
   return db;
 }
 
+export function closeDb(): void {
+  if (db) {
+    db.close();
+  }
+}
+
 export function initDb(dbPath: string): void {
   db = new Database(path.resolve(dbPath));
   db.pragma('journal_mode = WAL');
