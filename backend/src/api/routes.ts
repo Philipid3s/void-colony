@@ -1,8 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { getGameState, setGameState } from '../gameLoop';
 import { createInitialState } from '../engine/initialState';
-import { canStartConstruction, startConstruction } from '../engine/buildingEngine';
-import { startResearch } from '../engine/researchEngine';
 import { saveState, loadState, listSaves } from '../db/database';
 import { Difficulty, RationLevel, TaskId } from '../models/GameState';
 import { TECHS, TechId } from '../config/techs';
@@ -10,7 +8,17 @@ import { RECIPES } from '../config/recipes';
 import { BUILDINGS } from '../config/buildings';
 import { RESOURCES } from '../config/resources';
 import { startCrafting } from '../engine/craftingEngine';
-import { assignCrewTask, dismantleBuilding, scavengeShip as scavengeShipAction, setMineResource as setMineResourceAction } from '../services/gameActions';
+import {
+  assignCrewTask,
+  assignCrewTasksBulk,
+  beginResearch,
+  dismantleBuilding,
+  scavengeShip as scavengeShipAction,
+  scoutTile as scoutTileAction,
+  startBuild,
+  setBuildingPower,
+  setMineResource as setMineResourceAction,
+} from '../services/gameActions';
 import { migrateSaveState } from '../services/saveMigration';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -135,6 +143,7 @@ router.post('/action/assign-crew-bulk', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Too many assignments in one request' });
   }
 
+  const normalizedAssignments: { crewId: string; taskId: TaskId | null; buildingId: string | null }[] = [];
   for (const raw of assignments) {
     if (!isObject(raw)) continue;
     const crewId = readString(raw['crewId']);
@@ -145,13 +154,10 @@ router.post('/action/assign-crew-bulk', (req: Request, res: Response) => {
     const parsedBuildingId = readNullableString(raw['buildingId']);
     const buildingId = parsedBuildingId === undefined ? null : parsedBuildingId;
     if (!crewId || (rawTask !== null && !isTaskIdValue(rawTask)) || parsedBuildingId === undefined) continue;
-
-    const crew = state.crew.find(c => c.id === crewId);
-    if (crew) {
-      crew.assignedTask = taskId;
-      crew.assignedBuildingId = buildingId ?? null;
-    }
+    normalizedAssignments.push({ crewId, taskId, buildingId: buildingId ?? null });
   }
+
+  assignCrewTasksBulk(state, normalizedAssignments);
 
   res.json({ ok: true });
 });
@@ -166,21 +172,18 @@ router.post('/action/build', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid buildingType' });
   }
 
-  const check = canStartConstruction(state, buildingType);
-  if (!check.ok) {
-    if (check.reason === 'missing_tech') {
-      return res.status(400).json({ error: `Missing prerequisite tech: ${check.details}` });
+  const result = startBuild(state, buildingType);
+  if (!result.ok) {
+    if (result.error === 'missing_tech') {
+      return res.status(400).json({ error: `Missing prerequisite tech: ${result.details}` });
     }
-    if (check.reason === 'insufficient_resources') {
+    if (result.error === 'insufficient_resources') {
       return res.status(400).json({ error: 'Cannot build: insufficient resources' });
     }
     return res.status(400).json({ error: 'Cannot build: invalid building type' });
   }
 
-  const building = startConstruction(state, buildingType);
-  if (!building) return res.status(400).json({ error: 'Cannot build' });
-
-  res.json({ ok: true, building });
+  res.json({ ok: true, building: result.building });
 });
 
 router.post('/action/research', (req: Request, res: Response) => {
@@ -193,8 +196,8 @@ router.post('/action/research', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid techId' });
   }
 
-  const ok = startResearch(state, techId as TechId);
-  if (!ok) return res.status(400).json({ error: 'Cannot research: prerequisites not met or already completed' });
+  const result = beginResearch(state, techId as TechId);
+  if (!result.ok) return res.status(400).json({ error: 'Cannot research: prerequisites not met or already completed' });
 
   res.json({ ok: true });
 });
@@ -224,19 +227,8 @@ router.post('/action/set-energy', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid set-energy payload' });
   }
 
-  const building = state.buildings.find(b => b.id === buildingId);
-  if (!building) return res.status(404).json({ error: 'Building not found' });
-  building.powered = powered;
-
-  // Unassign all crew from a building when it's powered off
-  if (!powered) {
-    for (const crew of state.crew) {
-      if (crew.assignedBuildingId === buildingId) {
-        crew.assignedTask = null;
-        crew.assignedBuildingId = null;
-      }
-    }
-  }
+  const result = setBuildingPower(state, buildingId, powered);
+  if (!result.ok) return res.status(404).json({ error: 'Building not found' });
 
   res.json({ ok: true });
 });
@@ -309,124 +301,28 @@ router.post('/action/scout-tile', (req: Request, res: Response) => {
   if (x == null || y == null) {
     return res.status(400).json({ error: 'Invalid scout coordinates' });
   }
-  if (y < 0 || y >= state.map.length || x < 0 || x >= state.map[0].length) {
-    return res.status(400).json({ error: 'Scout coordinates out of bounds' });
-  }
 
-  const scouts = state.crew.filter(c => c.isAlive && c.assignedTask === 'task_scout');
-  if (scouts.length === 0) {
+  const result = scoutTileAction(state, x, y);
+  if (!result.ok) {
+    if (result.error === 'out_of_bounds') {
+      return res.status(400).json({ error: 'Scout coordinates out of bounds' });
+    }
     return res.status(400).json({ error: 'No scouts assigned. Assign crew to the Scout task first.' });
   }
 
-  // Explore the target tile + ring of 1 around it
-  let newTiles = 0;
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      const ny = y + dy, nx = x + dx;
-      if (ny >= 0 && ny < state.map.length && nx >= 0 && nx < state.map[0].length) {
-        if (!state.map[ny][nx].explored) {
-          state.map[ny][nx].explored = true;
-          newTiles++;
-        }
-      }
-    }
-  }
-
-  const msg = `Scout party sent to (${x},${y}) — ${newTiles} new tile${newTiles !== 1 ? 's' : ''} revealed.`;
-  state.eventLog.unshift({ id: uuidv4(), tick: state.tick, message: msg, type: 'info', resolved: true });
-  if (state.eventLog.length > 200) state.eventLog.pop();
-
-  res.json({ ok: true, newTiles });
+  res.json({ ok: true, newTiles: result.newTiles });
 });
 
 router.post('/action/scavenge-ship', (_req: Request, res: Response) => {
   const state = getGameState();
   if (!state) return res.status(404).json({ error: 'No active game' });
 
-  const MAX_SCAVENGES = 4;
-  if (state.shipScavengeCount >= MAX_SCAVENGES) {
+  const result = scavengeShipAction(state);
+  if (!result) {
     return res.status(400).json({ error: 'The ship has been picked clean — nothing more to salvage.' });
   }
 
-  const round = state.shipScavengeCount + 1; // 1..4
-
-  function rnd(min: number, max: number) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-  // Diminishing hauls per round
-  const hauls: Record<number, Array<{ resource: string; min: number; max: number }>> = {
-    1: [
-      { resource: 'iron_ore',    min: 70, max: 100 },
-      { resource: 'steel',       min: 30, max:  50 },
-      { resource: 'copper',      min: 15, max:  25 },
-      { resource: 'coal',        min: 15, max:  25 },
-      { resource: 'plastic',     min: 15, max:  25 },
-      { resource: 'electronics', min:  8, max:  15 },
-    ],
-    2: [
-      { resource: 'iron_ore',    min: 40, max:  65 },
-      { resource: 'steel',       min: 15, max:  30 },
-      { resource: 'copper',      min:  8, max:  18 },
-      { resource: 'coal',        min:  8, max:  15 },
-      { resource: 'plastic',     min:  8, max:  15 },
-      { resource: 'electronics', min:  4, max:  10 },
-    ],
-    3: [
-      { resource: 'iron_ore',    min: 20, max:  40 },
-      { resource: 'steel',       min:  5, max:  15 },
-      { resource: 'copper',      min:  5, max:  10 },
-      { resource: 'plastic',     min:  3, max:   8 },
-      { resource: 'electronics', min:  2, max:   5 },
-    ],
-    4: [
-      { resource: 'iron_ore',    min: 10, max:  20 },
-      { resource: 'coal',        min:  5, max:  10 },
-    ],
-  };
-
-  const loot = hauls[round] ?? [];
-  const gained: Record<string, number> = {};
-  for (const entry of loot) {
-    const amount = rnd(entry.min, entry.max);
-    state.resources[entry.resource] = (state.resources[entry.resource] ?? 0) + amount;
-    gained[entry.resource] = amount;
-  }
-
-  state.shipScavengeCount += 1;
-
-  // Remove the wrecked ship once fully stripped
-  if (state.shipScavengeCount >= MAX_SCAVENGES) {
-    const shipIdx = state.buildings.findIndex(b => b.type === 'ship');
-    if (shipIdx !== -1) {
-      // Unassign any crew assigned to the ship
-      const shipId = state.buildings[shipIdx].id;
-      for (const crew of state.crew) {
-        if (crew.assignedBuildingId === shipId) {
-          crew.assignedTask = null;
-          crew.assignedBuildingId = null;
-        }
-      }
-      state.buildings.splice(shipIdx, 1);
-    }
-  }
-
-  const lootSummary = Object.entries(gained)
-    .map(([r, n]) => `${n} ${r.replace(/_/g, ' ')}`)
-    .join(', ');
-  const remainingRounds = MAX_SCAVENGES - state.shipScavengeCount;
-  const roundSuffix = remainingRounds === 0
-    ? 'The ship is now completely stripped.'
-    : `(${remainingRounds} scavenge${remainingRounds !== 1 ? 's' : ''} remaining)`;
-
-  state.eventLog.unshift({
-    id: uuidv4(),
-    tick: state.tick,
-    message: `Ship scavenged — recovered: ${lootSummary}. ${roundSuffix}`,
-    type: 'success',
-    resolved: true,
-  });
-  if (state.eventLog.length > 200) state.eventLog.pop();
-
-  res.json({ ok: true, gained, scavengeCount: state.shipScavengeCount, remaining: remainingRounds });
+  res.json({ ok: true, ...result });
 });
 
 router.get('/config/recipes', (_req: Request, res: Response) => {
@@ -438,3 +334,5 @@ router.get('/config/buildings', (_req: Request, res: Response) => {
 });
 
 export default router;
+
+

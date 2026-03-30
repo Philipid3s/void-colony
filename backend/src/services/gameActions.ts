@@ -1,7 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
 
+import { canStartConstruction, startConstruction } from '../engine/buildingEngine';
+import { startResearch } from '../engine/researchEngine';
 import { BUILDINGS } from '../config/buildings';
 import { ResourceId } from '../config/resources';
+import { TechId } from '../config/techs';
 import { BuildingInstance, GameState, TaskId } from '../models/GameState';
 
 const MINE_BASIC_RESOURCES = new Set<ResourceId>(['iron_ore', 'coal', 'sand', 'clay', 'copper', 'aluminium', 'silicon', 'sulfur']);
@@ -14,6 +17,44 @@ export function assignCrewTask(state: GameState, crewId: string, taskId: TaskId 
   crew.assignedTask = taskId;
   crew.assignedBuildingId = buildingId;
   return true;
+}
+
+export function assignCrewTasksBulk(state: GameState, assignments: { crewId: string; taskId: TaskId | null; buildingId: string | null }[]): number {
+  let updated = 0;
+  for (const assignment of assignments) {
+    if (assignCrewTask(state, assignment.crewId, assignment.taskId, assignment.buildingId)) {
+      updated += 1;
+    }
+  }
+  return updated;
+}
+
+export type StartBuildResult =
+  | { ok: true; building: BuildingInstance }
+  | { ok: false; error: 'invalid_type' | 'missing_tech' | 'insufficient_resources'; details?: string };
+
+export function startBuild(state: GameState, buildingType: string): StartBuildResult {
+  const check = canStartConstruction(state, buildingType);
+  if (!check.ok) {
+    return { ok: false, error: check.reason, details: check.details };
+  }
+
+  const building = startConstruction(state, buildingType);
+  if (!building) {
+    return { ok: false, error: 'invalid_type' };
+  }
+
+  return { ok: true, building };
+}
+
+export type StartResearchResult =
+  | { ok: true }
+  | { ok: false; error: 'cannot_research' };
+
+export function beginResearch(state: GameState, techId: TechId): StartResearchResult {
+  const ok = startResearch(state, techId);
+  if (!ok) return { ok: false, error: 'cannot_research' };
+  return { ok: true };
 }
 
 export type SetMineResourceResult =
@@ -62,6 +103,22 @@ export function dismantleBuilding(state: GameState, buildingId: string): { refun
   unassignCrewFromBuilding(state, buildingId);
   state.buildings.splice(idx, 1);
   return { refund };
+}
+
+export type SetBuildingPowerResult =
+  | { ok: true }
+  | { ok: false; error: 'building_not_found' };
+
+export function setBuildingPower(state: GameState, buildingId: string, powered: boolean): SetBuildingPowerResult {
+  const building = state.buildings.find(b => b.id === buildingId);
+  if (!building) return { ok: false, error: 'building_not_found' };
+
+  building.powered = powered;
+  if (!powered) {
+    unassignCrewFromBuilding(state, buildingId);
+  }
+
+  return { ok: true };
 }
 
 export function scavengeShip(state: GameState, randomInt: (min: number, max: number) => number = defaultRandomInt): { gained: Record<string, number>; scavengeCount: number; remaining: number } | null {
@@ -134,6 +191,46 @@ export function scavengeShip(state: GameState, randomInt: (min: number, max: num
   if (state.eventLog.length > 200) state.eventLog.pop();
 
   return { gained, scavengeCount: state.shipScavengeCount, remaining };
+}
+
+export type ScoutTileResult =
+  | { ok: true; newTiles: number }
+  | { ok: false; error: 'out_of_bounds' | 'no_scouts' };
+
+export function scoutTile(state: GameState, x: number, y: number): ScoutTileResult {
+  if (y < 0 || y >= state.map.length || x < 0 || x >= state.map[0].length) {
+    return { ok: false, error: 'out_of_bounds' };
+  }
+
+  const scouts = state.crew.filter(c => c.isAlive && c.assignedTask === 'task_scout');
+  if (scouts.length === 0) {
+    return { ok: false, error: 'no_scouts' };
+  }
+
+  let newTiles = 0;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const ny = y + dy;
+      const nx = x + dx;
+      if (ny >= 0 && ny < state.map.length && nx >= 0 && nx < state.map[0].length) {
+        if (!state.map[ny][nx].explored) {
+          state.map[ny][nx].explored = true;
+          newTiles++;
+        }
+      }
+    }
+  }
+
+  state.eventLog.unshift({
+    id: uuidv4(),
+    tick: state.tick,
+    message: `Scout party sent to (${x},${y}) — ${newTiles} new tile${newTiles !== 1 ? 's' : ''} revealed.`,
+    type: 'info',
+    resolved: true,
+  });
+  if (state.eventLog.length > 200) state.eventLog.pop();
+
+  return { ok: true, newTiles };
 }
 
 function unassignCrewFromBuilding(state: GameState, buildingId: string): void {

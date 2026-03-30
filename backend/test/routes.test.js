@@ -66,6 +66,32 @@ test('POST /api/action/assign-crew rejects malformed task ids', async () => {
   }
 });
 
+test('POST /api/action/assign-crew-bulk updates multiple crew assignments', async () => {
+  const state = createInitialState('normal');
+  setGameState(state);
+  const server = await createTestServer();
+
+  try {
+    const response = await fetch(`${server.baseUrl}/api/action/assign-crew-bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assignments: [
+          { crewId: state.crew[0].id, taskId: 'task_water', buildingId: null },
+          { crewId: state.crew[1].id, taskId: 'task_farm', buildingId: null },
+        ],
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const updated = getGameState();
+    assert.equal(updated.crew[0].assignedTask, 'task_water');
+    assert.equal(updated.crew[1].assignedTask, 'task_farm');
+  } finally {
+    await server.close();
+  }
+});
+
 test('POST /api/action/set-mine-resource assigns valid mine targets', async () => {
   const state = createInitialState('normal');
   state.buildings.push({
@@ -92,6 +118,42 @@ test('POST /api/action/set-mine-resource assigns valid mine targets', async () =
 
     assert.equal(response.status, 200);
     assert.equal(getGameState().buildings.find((building) => building.id === 'mine-1').miningResource, 'copper');
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /api/action/set-energy powers down a building and clears assignments', async () => {
+  const state = createInitialState('normal');
+  state.buildings.push({
+    id: 'well-1',
+    type: 'water_well',
+    status: 'operational',
+    constructionProgress: 100,
+    condition: 100,
+    powered: true,
+    level: 1,
+  });
+  state.crew[0].assignedTask = 'task_water';
+  state.crew[0].assignedBuildingId = 'well-1';
+  setGameState(state);
+  const server = await createTestServer();
+
+  try {
+    const response = await fetch(`${server.baseUrl}/api/action/set-energy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        buildingId: 'well-1',
+        powered: false,
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const updated = getGameState();
+    assert.equal(updated.buildings.find((building) => building.id === 'well-1').powered, false);
+    assert.equal(updated.crew[0].assignedTask, null);
+    assert.equal(updated.crew[0].assignedBuildingId, null);
   } finally {
     await server.close();
   }
@@ -161,6 +223,33 @@ test('POST /api/action/scavenge-ship strips the ship on the final salvage run', 
     assert.equal(updated.crew[0].assignedTask, null);
     assert.equal(updated.crew[0].assignedBuildingId, null);
     assert.match(updated.eventLog[0].message, /Ship scavenged/);
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /api/action/scout-tile reveals nearby tiles when scouts are assigned', async () => {
+  const state = createInitialState('normal');
+  state.crew[0].assignedTask = 'task_scout';
+  for (let ny = 8; ny <= 10; ny += 1) {
+    for (let nx = 8; nx <= 10; nx += 1) {
+      state.map[ny][nx].explored = false;
+    }
+  }
+  setGameState(state);
+  const server = await createTestServer();
+
+  try {
+    const response = await fetch(`${server.baseUrl}/api/action/scout-tile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: 9, y: 9 }),
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.newTiles, 9);
+    assert.equal(getGameState().map[9][9].explored, true);
   } finally {
     await server.close();
   }
